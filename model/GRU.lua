@@ -5,8 +5,9 @@ local GRU = {}
 Creates one timestep of one GRU
 Paper reference: http://arxiv.org/pdf/1412.3555v1.pdf
 ]]--
-function GRU.gru(input_size, rnn_size, n, dropout)
+function GRU.gru(input_size, rnn_size, n, dropout, onehot)
   dropout = dropout or 0 
+  onehot = onehot or 0
   -- there are n+1 inputs (hiddens on each layer and x)
   local inputs = {}
   table.insert(inputs, nn.Identity()()) -- x
@@ -26,9 +27,13 @@ function GRU.gru(input_size, rnn_size, n, dropout)
 
     local prev_h = inputs[L+1]
     -- the input to this layer
-    if L == 1 then 
-      x = OneHot(input_size)(inputs[1])
-      input_size_L = input_size
+    if L == 1 then
+      if onehot == 1 then
+        x = OneHot(input_size)(inputs[1])
+      else
+        x = inputs[1]
+      end
+        input_size_L = input_size
     else 
       x = outputs[(L-1)] 
       if dropout > 0 then x = nn.Dropout(dropout)(x) end -- apply dropout, if any
@@ -51,11 +56,13 @@ function GRU.gru(input_size, rnn_size, n, dropout)
     table.insert(outputs, next_h)
   end
 -- set up the decoder
+  --[[
   local top_h = outputs[#outputs]
   if dropout > 0 then top_h = nn.Dropout(dropout)(top_h) end
   local proj = nn.Linear(rnn_size, input_size)(top_h)
   local logsoft = nn.LogSoftMax()(proj)
-  table.insert(outputs, logsoft)
+  table.insert(outputs, top_h)
+  ]]--
 
   return nn.gModule(inputs, outputs)
 end

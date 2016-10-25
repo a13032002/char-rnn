@@ -85,7 +85,8 @@ if not lfs.attributes(opt.model, 'mode') then
 end
 checkpoint = torch.load(opt.model)
 protos = checkpoint.protos
-protos.rnn:evaluate() -- put in eval mode so that dropout works properly
+protos.rnn_encoder:evaluate() -- put in eval mode so that dropout works properly
+protos.rnn_projection:evaluate() -- put in eval mode so that dropout works properly
 
 -- initialize the vocabulary (and its inverted version)
 local vocab = checkpoint.vocab
@@ -94,19 +95,23 @@ for c,i in pairs(vocab) do ivocab[i] = c end
 
 -- initialize the rnn state to all zeros
 gprint('creating an ' .. checkpoint.opt.model .. '...')
-local current_state
-current_state = {}
+local encoder_current_state
+local decoder_current_state
+encoder_current_state = {}
+decoder_current_state = {}
 for L = 1,checkpoint.opt.num_layers do
     -- c and h for all layers
     local h_init = torch.zeros(1, checkpoint.opt.rnn_size):double()
     if opt.gpuid >= 0 and opt.opencl == 0 then h_init = h_init:cuda() end
     if opt.gpuid >= 0 and opt.opencl == 1 then h_init = h_init:cl() end
-    table.insert(current_state, h_init:clone())
+    table.insert(encoder_current_state, h_init:clone())
+    table.insert(decoder_current_state, h_init:clone())
     if checkpoint.opt.model == 'lstm' then
-        table.insert(current_state, h_init:clone())
+      table.insert(encoder_current_state, h_init:clone())
+      table.insert(decoder_current_state, h_init:clone())
     end
 end
-state_size = #current_state
+state_size = #encoder_current_state
 
 -- do a few seeded timesteps
 local seed_text = opt.primetext
@@ -118,11 +123,21 @@ if string.len(seed_text) > 0 then
         io.write(ivocab[prev_char[1]])
         if opt.gpuid >= 0 and opt.opencl == 0 then prev_char = prev_char:cuda() end
         if opt.gpuid >= 0 and opt.opencl == 1 then prev_char = prev_char:cl() end
-        local lst = protos.rnn:forward{prev_char, unpack(current_state)}
+        
+        
+        local encoder_lst = protos.rnn_encoder:forward{prev_char, unpack(encoder_current_state)}
         -- lst is a list of [state1,state2,..stateN,output]. We want everything but last piece
-        current_state = {}
-        for i=1,state_size do table.insert(current_state, lst[i]) end
-        prediction = lst[#lst] -- last element holds the log probabilities
+        encoder_current_state = {}
+        if type(encoder_lst) ~= 'table' then encoder_lst = {[1] = encoder_lst} end
+        for i=1,state_size do table.insert(encoder_current_state, encoder_lst[i]) end
+
+        local decoder_lst = protos.rnn_decoder:forward{encoder_lst[state_size], unpack(decoder_current_state)}
+        decoder_current_state = {}
+        if type(decoder_lst) ~= 'table' then decoder_lst = {[1] = decoder_lst} end
+        for i=1,state_size do table.insert(decoder_current_state, decoder_lst[i]) end
+
+
+        prediction = protos.rnn_projection:forward(decoder_lst[#decoder_lst]) -- last element holds the log probabilities
     end
 else
     -- fill with uniform probabilities over characters (? hmm)
@@ -150,10 +165,19 @@ for i=1, opt.length do
     end
 
     -- forward the rnn for next character
-    local lst = protos.rnn:forward{prev_char, unpack(current_state)}
-    current_state = {}
-    for i=1,state_size do table.insert(current_state, lst[i]) end
-    prediction = lst[#lst] -- last element holds the log probabilities
+    local encoder_lst = protos.rnn_encoder:forward{prev_char, unpack(encoder_current_state)}
+    -- lst is a list of [state1,state2,..stateN,output]. We want everything but last piece
+    encoder_current_state = {}
+    if type(encoder_lst) ~= 'table' then encoder_lst = {[1] = encoder_lst} end
+    for i=1,state_size do table.insert(encoder_current_state, encoder_lst[i]) end
+
+    local decoder_lst = protos.rnn_decoder:forward{encoder_lst[state_size], unpack(decoder_current_state)}
+    decoder_current_state = {}
+    if type(decoder_lst) ~= 'table' then decoder_lst = {[1] = decoder_lst} end
+    for i=1,state_size do table.insert(decoder_current_state, decoder_lst[i]) end
+
+
+    prediction = protos.rnn_projection:forward(decoder_lst[#decoder_lst]) -- last element holds the log probabilities
 
     io.write(ivocab[prev_char[1]])
 end

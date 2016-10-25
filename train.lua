@@ -26,6 +26,7 @@ local model_utils = require 'util.model_utils'
 local LSTM = require 'model.LSTM'
 local GRU = require 'model.GRU'
 local RNN = require 'model.RNN'
+local LogSoftMaxProjection = require 'model.LogSoftMaxProjection'
 
 cmd = torch.CmdLine()
 cmd:text()
@@ -36,8 +37,8 @@ cmd:text('Options')
 cmd:option('-data_dir','data/tinyshakespeare','data directory. Should contain the file input.txt with input data')
 -- model params
 cmd:option('-rnn_size', 128, 'size of LSTM internal state')
-cmd:option('-num_layers', 2, 'number of layers in the LSTM')
-cmd:option('-model', 'lstm', 'lstm,gru or rnn')
+cmd:option('-num_layers', 1, 'number of layers in the LSTM')
+cmd:option('-model', 'gru', 'lstm,gru or rnn')
 -- optimization
 cmd:option('-learning_rate',2e-3,'learning rate')
 cmd:option('-learning_rate_decay',0.97,'learning rate decay')
@@ -55,7 +56,7 @@ cmd:option('-init_from', '', 'initialize network parameters from checkpoint at t
 -- bookkeeping
 cmd:option('-seed',123,'torch manual random number generator seed')
 cmd:option('-print_every',1,'how many steps/minibatches between printing out the loss')
-cmd:option('-eval_val_every',1000,'every how many iterations should we evaluate on validation data?')
+cmd:option('-eval_val_every',100,'every how many iterations should we evaluate on validation data?')
 cmd:option('-checkpoint_dir', 'cv', 'output directory where checkpoints get written')
 cmd:option('-savefile','lstm','filename to autosave the checkpont to. Will be inside checkpoint_dir/')
 cmd:option('-accurate_gpu_timing',0,'set this flag to 1 to get precise timings when using GPU. Might make code bit slower but reports accurate timings.')
@@ -142,12 +143,14 @@ if string.len(opt.init_from) > 0 then
     opt.model = checkpoint.opt.model
     do_random_init = false
 else
-    print('creating an ' .. opt.model .. ' with ' .. opt.num_layers .. ' layers')
+    print('creating an ' .. opt.model .. ' with ' .. opt.num_layers .. ' layers' .. ' rnn_size ' .. opt.rnn_size)
     protos = {}
     if opt.model == 'lstm' then
         protos.rnn = LSTM.lstm(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout)
     elseif opt.model == 'gru' then
-        protos.rnn = GRU.gru(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout)
+        protos.rnn_encoder = GRU.gru(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout, 1)
+		protos.rnn_decoder = GRU.gru(opt.rnn_size, opt.rnn_size, opt.num_layers, opt.dropout, 0)
+		protos.rnn_projection = LogSoftMaxProjection.log_softmax_projection(opt.rnn_size, vocab_size)
     elseif opt.model == 'rnn' then
         protos.rnn = RNN.rnn(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout)
     end
@@ -175,7 +178,7 @@ if opt.gpuid >= 0 and opt.opencl == 1 then
 end
 
 -- put the above things into one flattened parameters tensor
-params, grad_params = model_utils.combine_all_parameters(protos.rnn)
+params, grad_params = model_utils.combine_all_parameters(protos.rnn_encoder, protos.rnn_projection)
 
 -- initialization
 if do_random_init then
@@ -201,7 +204,6 @@ for name,proto in pairs(protos) do
     print('cloning ' .. name)
     clones[name] = model_utils.clone_many_times(proto, opt.seq_length, not proto.parameters)
 end
-
 -- preprocessing helper function
 function prepro(x,y)
     x = x:transpose(1,2):contiguous() -- swap the axes for faster indexing
@@ -226,7 +228,8 @@ function eval_split(split_index, max_batches)
 
     loader:reset_batch_pointer(split_index) -- move batch iteration pointer for this split to front
     local loss = 0
-    local rnn_state = {[0] = init_state}
+    local encoder_rnn_state = {[0] = init_state}
+    local decoder_rnn_state = {[0] = init_state}
     
     for i = 1,n do -- iterate over batches in the split
         -- fetch a batch
@@ -234,15 +237,25 @@ function eval_split(split_index, max_batches)
         x,y = prepro(x,y)
         -- forward pass
         for t=1,opt.seq_length do
-            clones.rnn[t]:evaluate() -- for dropout proper functioning
-            local lst = clones.rnn[t]:forward{x[t], unpack(rnn_state[t-1])}
-            rnn_state[t] = {}
-            for i=1,#init_state do table.insert(rnn_state[t], lst[i]) end
-            prediction = lst[#lst] 
+            clones.rnn_encoder[t]:evaluate() -- for dropout proper functioning
+            local encoder_lst = clones.rnn_encoder[t]:forward{x[t], unpack(encoder_rnn_state[t-1])}
+			if type(encoder_lst) ~= 'table' then 
+				encoder_lst = {[1] = encoder_lst}
+			end
+            encoder_rnn_state[t] = {}
+            for i=1,#init_state do table.insert(encoder_rnn_state[t], encoder_lst[i]) end
+
+			clones.rnn_decoder[t]:evaluate()
+			local decoder_lst = clones.rnn_decoder[t]:forward({encoder_rnn_state[t][#init_state], unpack(decoder_rnn_state[t-1])})
+			if type(decoder_lst) ~= 'table' then decoder_lst = {[1] = decoder_lst} end
+			decoder_rnn_state[t] = {}
+			for i=1,#init_state do table.insert(decoder_rnn_state[t], decoder_lst[i]) end
+
+            prediction = clones.rnn_projection[t]:forward(decoder_lst[#init_state]) 
             loss = loss + clones.criterion[t]:forward(prediction, y[t])
         end
         -- carry over lstm state
-        rnn_state[0] = rnn_state[#rnn_state]
+        --rnn_state[0] = rnn_state[#rnn_state]
         print(i .. '/' .. n .. '...')
     end
 
@@ -251,7 +264,8 @@ function eval_split(split_index, max_batches)
 end
 
 -- do fwd/bwd and return loss, grad_params
-local init_state_global = clone_list(init_state)
+local encoder_init_state_global = clone_list(init_state)
+local decoder_init_state_global = clone_list(init_state)
 function feval(x)
     if x ~= params then
         params:copy(x)
@@ -262,38 +276,76 @@ function feval(x)
     local x, y = loader:next_batch(1)
     x,y = prepro(x,y)
     ------------------- forward pass -------------------
-    local rnn_state = {[0] = init_state_global}
+    local encoder_rnn_state = {[0] = encoder_init_state_global}
+	local decoder_rnn_state = {[0] = decoder_init_state_global}
     local predictions = {}           -- softmax outputs
     local loss = 0
     for t=1,opt.seq_length do
-        clones.rnn[t]:training() -- make sure we are in correct mode (this is cheap, sets flag)
-        local lst = clones.rnn[t]:forward{x[t], unpack(rnn_state[t-1])}
-        rnn_state[t] = {}
-        for i=1,#init_state do table.insert(rnn_state[t], lst[i]) end -- extract the state, without output
-        predictions[t] = lst[#lst] -- last element is the prediction
+		-- foward encoder
+        clones.rnn_encoder[t]:training() -- make sure we are in correct mode (this is cheap, sets flag)
+        local encoder_lst = clones.rnn_encoder[t]:forward({x[t], unpack(encoder_rnn_state[t-1])})
+        encoder_rnn_state[t] = {}
+		if type(encoder_lst) ~= 'table' then encoder_lst = {[1] = encoder_lst} end
+		for i=1,#init_state do table.insert(encoder_rnn_state[t], encoder_lst[i]) end -- extract the state
+
+		-- foward decoder
+		clones.rnn_decoder[t]:training()
+		local decoder_lst = clones.rnn_decoder[t]:forward({encoder_lst[#init_state], unpack(decoder_rnn_state[t-1])})
+		decoder_rnn_state[t] = {}
+		if type(decoder_lst) ~= 'table' then decoder_lst = {[1] = decoder_lst} end
+		for i=1,#init_state do table.insert(decoder_rnn_state[t], decoder_lst[i]) end 
+		
+
+
+        predictions[t] = clones.rnn_projection[t]:forward(decoder_lst[#init_state]) -- last element is the prediction
         loss = loss + clones.criterion[t]:forward(predictions[t], y[t])
     end
     loss = loss / opt.seq_length
     ------------------ backward pass -------------------
     -- initialize gradient at time t to be zeros (there's no influence from future)
-    local drnn_state = {[opt.seq_length] = clone_list(init_state, true)} -- true also zeros the clones
+    local encoder_drnn_state = {[opt.seq_length] = clone_list(init_state, true)} -- true also zeros the clones
+	local decoder_drnn_state = {[opt.seq_length] = clone_list(init_state, true)}
     for t=opt.seq_length,1,-1 do
-        -- backprop through loss, and softmax/linear
+        -- backprop decoder
         local doutput_t = clones.criterion[t]:backward(predictions[t], y[t])
-        table.insert(drnn_state[t], doutput_t)
-        local dlst = clones.rnn[t]:backward({x[t], unpack(rnn_state[t-1])}, drnn_state[t])
-        drnn_state[t-1] = {}
-        for k,v in pairs(dlst) do
+		local dprojection = clones.rnn_projection[t]:backward(decoder_rnn_state[t][#init_state], doutput_t)
+		decoder_drnn_state[t][#init_state] = decoder_drnn_state[t][#init_state] + dprojection
+		local decoder_dlst
+		if opt.num_layers == 1 and opt.model == 'gru'  then
+			decoder_dlst = clones.rnn_decoder[t]:backward({encoder_rnn_state[t][#init_state], unpack(decoder_rnn_state[t-1])}, decoder_drnn_state[t][1])
+		else
+			decoder_dlst = clones.rnn_decoder[t]:backward({encoder_rnn_state[t][#init_state], unpack(decoder_rnn_state[t-1])}, decoder_drnn_state[t])
+		end
+        decoder_drnn_state[t-1] = {}
+        for k,v in pairs(decoder_dlst) do
+         --   if k > 1 then -- k == 1 is gradient on x, which we dont need
+                -- note we do k-1 because first item is dembeddings, and then follow the 
+                -- derivatives of the state, starting at index 2. I know...
+                decoder_drnn_state[t-1][k-1] = v
+         --   end
+        end
+
+		-- backward encoder
+		encoder_drnn_state[t][#init_state] = encoder_drnn_state[t][#init_state] + decoder_drnn_state[t][1]
+		if opt.num_layers == 1 and opt.model == 'gru'  then
+			encoder_dlst = clones.rnn_encoder[t]:backward({x[t], unpack(encoder_rnn_state[t-1])}, encoder_drnn_state[t][1])
+		else
+			encoder_dlst = clones.rnn_encoder[t]:backward({x[t], unpack(encoder_rnn_state[t-1])}, encoder_drnn_state[t])
+		end
+        encoder_drnn_state[t-1] = {}
+        for k,v in pairs(encoder_dlst) do
             if k > 1 then -- k == 1 is gradient on x, which we dont need
                 -- note we do k-1 because first item is dembeddings, and then follow the 
                 -- derivatives of the state, starting at index 2. I know...
-                drnn_state[t-1][k-1] = v
+                encoder_drnn_state[t-1][k-1] = v
             end
         end
+
+		local encoder_dlsg
     end
     ------------------------ misc ----------------------
     -- transfer final state to initial state (BPTT)
-    init_state_global = rnn_state[#rnn_state] -- NOTE: I don't think this needs to be a clone, right?
+--    init_state_global = encoder_rnn_state[#encoder_rnn_state] -- NOTE: I don't think this needs to be a clone, right?
     -- grad_params:div(opt.seq_length) -- this line should be here but since we use rmsprop it would have no effect. Removing for efficiency
     -- clip gradient element-wise
     grad_params:clamp(-opt.grad_clip, opt.grad_clip)

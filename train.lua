@@ -27,6 +27,7 @@ local LSTM = require 'model.LSTM'
 local GRU = require 'model.GRU'
 local RNN = require 'model.RNN'
 local LogSoftMaxProjection = require 'model.LogSoftMaxProjection'
+local Attention = require 'model.Attention'
 
 cmd = torch.CmdLine()
 cmd:text()
@@ -151,6 +152,7 @@ else
         protos.rnn_encoder = GRU.gru(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout, 1)
 		protos.rnn_decoder = GRU.gru(opt.rnn_size, opt.rnn_size, opt.num_layers, opt.dropout, 0)
 		protos.rnn_projection = LogSoftMaxProjection.log_softmax_projection(opt.rnn_size, vocab_size)
+--		protos.attention = Attention.global_attention(opt.batch_size, opt.rnn_size)
     elseif opt.model == 'rnn' then
         protos.rnn = RNN.rnn(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout)
     end
@@ -244,7 +246,8 @@ function eval_split(split_index, max_batches)
 			end
             encoder_rnn_state[t] = {}
             for i=1,#init_state do table.insert(encoder_rnn_state[t], encoder_lst[i]) end
-
+        end
+        for t=1,opt.seq_length do
 			clones.rnn_decoder[t]:evaluate()
 			local decoder_lst = clones.rnn_decoder[t]:forward({encoder_rnn_state[t][#init_state], unpack(decoder_rnn_state[t-1])})
 			if type(decoder_lst) ~= 'table' then decoder_lst = {[1] = decoder_lst} end
@@ -258,6 +261,7 @@ function eval_split(split_index, max_batches)
         --rnn_state[0] = rnn_state[#rnn_state]
         print(i .. '/' .. n .. '...')
     end
+
 
     loss = loss / opt.seq_length / n
     return loss
@@ -278,7 +282,11 @@ function feval(x)
     ------------------- forward pass -------------------
     local encoder_rnn_state = {[0] = encoder_init_state_global}
 	local decoder_rnn_state = {[0] = decoder_init_state_global}
-    local predictions = {}           -- softmax outputs
+	--[[
+	local attention_input = {}
+	local attention_output = {}
+    --]]
+	local predictions = {}           -- softmax outputs
     local loss = 0
     for t=1,opt.seq_length do
 		-- foward encoder
@@ -288,15 +296,22 @@ function feval(x)
 		if type(encoder_lst) ~= 'table' then encoder_lst = {[1] = encoder_lst} end
 		for i=1,#init_state do table.insert(encoder_rnn_state[t], encoder_lst[i]) end -- extract the state
 
+		--[[
+		clones.attention[t]:training()
+		table.insert(attention_input, encoder_lst[#encoder_lst])
+		local c = clones.attention[t]:forward({attention_input, encoder_lst[#encoder_lst]})
+		table.insert(attention_output, c)
+		]]--
+    end
+    for t=1,opt.seq_length do
 		-- foward decoder
 		clones.rnn_decoder[t]:training()
-		local decoder_lst = clones.rnn_decoder[t]:forward({encoder_lst[#init_state], unpack(decoder_rnn_state[t-1])})
+		--local decoder_lst = clones.rnn_decoder[t]:forward({attention_output[t], unpack(decoder_rnn_state[t-1])})
+		local decoder_lst = clones.rnn_decoder[t]:forward({encoder_rnn_state[t][#init_state], unpack(decoder_rnn_state[t-1])})
 		decoder_rnn_state[t] = {}
 		if type(decoder_lst) ~= 'table' then decoder_lst = {[1] = decoder_lst} end
 		for i=1,#init_state do table.insert(decoder_rnn_state[t], decoder_lst[i]) end 
 		
-
-
         predictions[t] = clones.rnn_projection[t]:forward(decoder_lst[#init_state]) -- last element is the prediction
         loss = loss + clones.criterion[t]:forward(predictions[t], y[t])
     end
@@ -305,6 +320,8 @@ function feval(x)
     -- initialize gradient at time t to be zeros (there's no influence from future)
     local encoder_drnn_state = {[opt.seq_length] = clone_list(init_state, true)} -- true also zeros the clones
 	local decoder_drnn_state = {[opt.seq_length] = clone_list(init_state, true)}
+	local decoder_drnn_input = {}
+	--local acc = {}
     for t=opt.seq_length,1,-1 do
         -- backprop decoder
         local doutput_t = clones.criterion[t]:backward(predictions[t], y[t])
@@ -312,21 +329,39 @@ function feval(x)
 		decoder_drnn_state[t][#init_state] = decoder_drnn_state[t][#init_state] + dprojection
 		local decoder_dlst
 		if opt.num_layers == 1 and opt.model == 'gru'  then
-			decoder_dlst = clones.rnn_decoder[t]:backward({encoder_rnn_state[t][#init_state], unpack(decoder_rnn_state[t-1])}, decoder_drnn_state[t][1])
+			--decoder_dlst = clones.rnn_decoder[t]:backward({attention_output[t], unpack(decoder_rnn_state[t-1])}, decoder_drnn_state[t][1])
+			decoder_dlst = clones.rnn_decoder[t]:backward({encoder_rnn_state[t], unpack(decoder_rnn_state[t-1])}, decoder_drnn_state[t][1])
 		else
-			decoder_dlst = clones.rnn_decoder[t]:backward({encoder_rnn_state[t][#init_state], unpack(decoder_rnn_state[t-1])}, decoder_drnn_state[t])
+			--decoder_dlst = clones.rnn_decoder[t]:backward({attention_output[t], unpack(decoder_rnn_state[t-1])}, decoder_drnn_state[t])
+			decoder_dlst = clones.rnn_decoder[t]:backward({encoder_rnn_state[t], unpack(decoder_rnn_state[t-1])}, decoder_drnn_state[t])
 		end
         decoder_drnn_state[t-1] = {}
         for k,v in pairs(decoder_dlst) do
-         --   if k > 1 then -- k == 1 is gradient on x, which we dont need
+            if k > 1 then -- k == 1 is gradient on x, which we dont need
                 -- note we do k-1 because first item is dembeddings, and then follow the 
                 -- derivatives of the state, starting at index 2. I know...
                 decoder_drnn_state[t-1][k-1] = v
-         --   end
+			else
+				decoder_drnn_input[t] = v
+            end
         end
 
+		--table.insert(acc, torch.zeros(opt.batch_size, opt.rnn_size)
+
+    end
+    for t=opt.seq_length,1,-1 do
+		-- backward attention
+
+		--[[
+		local dattention = clones.attention[t]:backward({attention_input, encoder_rnn_state[t][#init_state]}, decoder_drnn_state[t][0])
+		acc[t]:add(dattention[2])
+		for k, v in pairs(dattention[1]) do
+			acc[k]:add(v)
+		end
+		--]]
+
 		-- backward encoder
-		encoder_drnn_state[t][#init_state] = encoder_drnn_state[t][#init_state] + decoder_drnn_state[t][1]
+		encoder_drnn_state[t][#init_state] = encoder_drnn_state[t][#init_state] + decoder_drnn_input[t]
 		if opt.num_layers == 1 and opt.model == 'gru'  then
 			encoder_dlst = clones.rnn_encoder[t]:backward({x[t], unpack(encoder_rnn_state[t-1])}, encoder_drnn_state[t][1])
 		else
@@ -341,7 +376,6 @@ function feval(x)
             end
         end
 
-		local encoder_dlsg
     end
     ------------------------ misc ----------------------
     -- transfer final state to initial state (BPTT)

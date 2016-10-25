@@ -176,7 +176,6 @@ for i=1, opt.length do
     if type(decoder_lst) ~= 'table' then decoder_lst = {[1] = decoder_lst} end
     for i=1,state_size do table.insert(decoder_current_state, decoder_lst[i]) end
 
-
     prediction = protos.rnn_projection:forward(decoder_lst[#decoder_lst]) -- last element holds the log probabilities
 
     io.write(ivocab[prev_char[1]])

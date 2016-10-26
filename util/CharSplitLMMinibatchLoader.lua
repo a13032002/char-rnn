@@ -52,6 +52,7 @@ function CharSplitLMMinibatchLoader.create(data_dir, batch_size, seq_length, spl
 
     -- count vocab
     self.vocab_size = 0
+    print(self.vocab_mapping)
     for _ in pairs(self.vocab_mapping) do 
         self.vocab_size = self.vocab_size + 1 
     end
@@ -64,6 +65,7 @@ function CharSplitLMMinibatchLoader.create(data_dir, batch_size, seq_length, spl
     local ydata = data:clone()
     ydata:sub(1,-2):copy(data:sub(2,-1))
     ydata[-1] = data[1]
+    for i=1,ydata:size(1) do if ydata[i] == 0 then data[i] = 0 end end
     self.x_batches = data:view(batch_size, -1):split(seq_length, 2)  -- #rows = #batches
     self.nbatches = #self.x_batches
     self.y_batches = ydata:view(batch_size, -1):split(seq_length, 2)  -- #rows = #batches
@@ -139,7 +141,7 @@ function CharSplitLMMinibatchLoader.text_to_tensor(in_textfile, out_vocabfile, o
     rawdata = f:read(cache_len)
     repeat
         for char in rawdata:gmatch'.' do
-            if not unordered[char] then unordered[char] = true end
+            if char ~= 'Z' and not unordered[char] then unordered[char] = true end
         end
         tot_len = tot_len + #rawdata
         rawdata = f:read(cache_len)
@@ -162,7 +164,11 @@ function CharSplitLMMinibatchLoader.text_to_tensor(in_textfile, out_vocabfile, o
     rawdata = f:read(cache_len)
     repeat
         for i=1, #rawdata do
+          if rawdata:sub(i, i) == 'Z' then
+            data[currlen+i] = 0
+          else
             data[currlen+i] = vocab_mapping[rawdata:sub(i, i)] -- lua has no string indexing using []
+          end
         end
         currlen = currlen + #rawdata
         rawdata = f:read(cache_len)

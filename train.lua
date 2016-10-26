@@ -14,6 +14,7 @@ which is turn based on other stuff in Torch, etc... (long lineage)
 ]]--
 
 require 'torch'
+require 'rnn'
 require 'nn'
 require 'nngraph'
 require 'optim'
@@ -149,14 +150,14 @@ else
     if opt.model == 'lstm' then
         protos.rnn = LSTM.lstm(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout)
     elseif opt.model == 'gru' then
-        protos.rnn_encoder = GRU.gru(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout, 1)
-		protos.rnn_decoder = GRU.gru(opt.rnn_size, opt.rnn_size, opt.num_layers, opt.dropout, 0)
-		protos.rnn_projection = LogSoftMaxProjection.log_softmax_projection(opt.rnn_size, vocab_size)
-		protos.attention = Attention.global_attention(opt.batch_size, opt.rnn_size)
+        protos.rnn_encoder = nn.MaskZero(GRU.gru(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout, 1), 1)
+		protos.rnn_decoder = nn.MaskZero(GRU.gru(opt.rnn_size, opt.rnn_size, opt.num_layers, opt.dropout, 0), 1)
+		protos.rnn_projection = nn.MaskZero(LogSoftMaxProjection.log_softmax_projection(opt.rnn_size, vocab_size), 1)
+		protos.attention = nn.MaskZero(Attention.global_attention(opt.batch_size, opt.rnn_size), 1)
     elseif opt.model == 'rnn' then
         protos.rnn = RNN.rnn(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout)
     end
-    protos.criterion = nn.ClassNLLCriterion()
+    protos.criterion = nn.MaskZeroCriterion(nn.ClassNLLCriterion(), 1)
 end
 
 -- the initial state of the cell/hidden states
@@ -208,8 +209,8 @@ for name,proto in pairs(protos) do
 end
 -- preprocessing helper function
 function prepro(x,y)
-    x = x:transpose(1,2):contiguous() -- swap the axes for faster indexing
-    y = y:transpose(1,2):contiguous()
+    x = x:transpose(1,2):contiguous():resize(x:size(2), x:size(1), 1) -- swap the axes for faster indexing
+    y = y:transpose(1,2):contiguous():resize(y:size(2), y:size(1), 1)
     if opt.gpuid >= 0 and opt.opencl == 0 then -- ship the input arrays to GPU
         -- have to convert to float because integers can't be cuda()'d
         x = x:float():cuda()
@@ -219,7 +220,7 @@ function prepro(x,y)
         x = x:cl()
         y = y:cl()
     end
-    return x,y
+    return x:float(),y
 end
 
 -- evaluate the loss over an entire split
@@ -252,7 +253,7 @@ function eval_split(split_index, max_batches)
 			table.insert(attention_input, encoder_lst[#encoder_lst])
 			clones.attention[t]:evaluate()
 			--print(attention_input)
-			local c = clones.attention[t]:forward({attention_input, encoder_lst[#encoder_lst]})
+			local c = clones.attention[t]:forward({encoder_lst[#encoder_lst], attention_input})
 			table.insert(attention_output, c)
         end
         for t=1,opt.seq_length do
@@ -306,7 +307,7 @@ function feval(x)
 		clones.attention[t]:training()
 		table.insert(attention_input, encoder_lst[#encoder_lst])
 		--print(attention_input)
-		local c = clones.attention[t]:forward({attention_input, encoder_lst[#encoder_lst]})
+		local c = clones.attention[t]:forward({encoder_lst[#encoder_lst], attention_input})
 		table.insert(attention_output, c)
     end
     for t=1,opt.seq_length do
@@ -358,9 +359,9 @@ function feval(x)
     for t=opt.seq_length,1,-1 do
 		-- backward attention
 
-		local dattention = clones.attention[t]:backward({attention_input, encoder_rnn_state[t][#init_state]}, decoder_drnn_input[t])
-		acc[t]:add(dattention[2])
-		for k, v in pairs(dattention[1]) do
+		local dattention = clones.attention[t]:backward({encoder_rnn_state[t][#init_state], attention_input}, decoder_drnn_input[t])
+		acc[t]:add(dattention[1])
+		for k, v in pairs(dattention[2]) do
 			acc[k]:add(v)
 		end
 

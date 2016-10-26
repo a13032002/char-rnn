@@ -10,6 +10,7 @@ https://github.com/oxford-cs-ml-2015/practical6
 
 require 'torch'
 require 'nn'
+require 'rnn'
 require 'nngraph'
 require 'optim'
 require 'lfs'

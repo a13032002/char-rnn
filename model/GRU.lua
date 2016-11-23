@@ -29,11 +29,13 @@ function GRU.gru(input_size, rnn_size, n, dropout, onehot)
     -- the input to this layer
     if L == 1 then
       if onehot == 1 then
-        x = OneHot(input_size)(inputs[1])
+        --x = OneHot(input_size)(inputs[1])
+        x = nn.LookupTableMaskZero(input_size, rnn_size)(inputs[1])
+        input_size_L = rnn_size
       else
         x = inputs[1]
-      end
         input_size_L = input_size
+      end
     else 
       x = outputs[(L-1)] 
       if dropout > 0 then x = nn.Dropout(dropout)(x) end -- apply dropout, if any

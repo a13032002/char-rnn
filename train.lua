@@ -22,13 +22,27 @@ require 'lfs'
 
 require 'util.OneHot'
 require 'util.misc'
-local CharSplitLMMinibatchLoader = require 'util.CharSplitLMMinibatchLoader'
+--local CharSplitLMMinibatchLoader = require 'util.CharSplitLMMinibatchLoader'
+local SessionDataLoader = require 'SessionDataLoader'
 local model_utils = require 'util.model_utils'
 local LSTM = require 'model.LSTM'
 local GRU = require 'model.GRU'
 local RNN = require 'model.RNN'
 local LogSoftMaxProjection = require 'model.LogSoftMaxProjection'
 local Attention = require 'model.Attention'
+
+function get_target_scores(scores, y)
+	assert (scores:size()[1] == y:size()[1])
+	assert (scores:size()[1] == opt.batch_size)
+	
+	target_scores = torch.zeros(opt.batch_size, 1)
+	for i = 1, opt.batch_size do
+		target_scores[i] = scores[i][y[i]]
+	end
+	
+	return target_scores
+end
+
 
 cmd = torch.CmdLine()
 cmd:text()
@@ -57,8 +71,8 @@ cmd:option('-val_frac',0.05,'fraction of data that goes into validation set')
 cmd:option('-init_from', '', 'initialize network parameters from checkpoint at this path')
 -- bookkeeping
 cmd:option('-seed',123,'torch manual random number generator seed')
-cmd:option('-print_every',1,'how many steps/minibatches between printing out the loss')
-cmd:option('-eval_val_every',100,'every how many iterations should we evaluate on validation data?')
+cmd:option('-print_every',100,'how many steps/minibatches between printing out the loss')
+cmd:option('-eval_val_every',500,'every how many iterations should we evaluate on validation data?')
 cmd:option('-checkpoint_dir', 'cv', 'output directory where checkpoints get written')
 cmd:option('-savefile','lstm','filename to autosave the checkpont to. Will be inside checkpoint_dir/')
 cmd:option('-accurate_gpu_timing',0,'set this flag to 1 to get precise timings when using GPU. Might make code bit slower but reports accurate timings.')
@@ -111,9 +125,10 @@ if opt.gpuid >= 0 and opt.opencl == 1 then
 end
 
 -- create the data loader class
-local loader = CharSplitLMMinibatchLoader.create(opt.data_dir, opt.batch_size, opt.seq_length, split_sizes)
-local vocab_size = loader.vocab_size  -- the number of distinct characters
-local vocab = loader.vocab_mapping
+--local loader = CharSplitLMMinibatchLoader.create(opt.data_dir, opt.batch_size, opt.seq_length, split_sizes)
+local loader = SessionDataLoader.create('./data/yoochoose/yoochoose-sessions.dat', opt.batch_size, 0.95)
+opt.seq_length = loader.global_max_session_length
+local vocab_size = loader.max_index  -- the number of distinct characters
 print('vocab size: ' .. vocab_size)
 -- make sure output directory exists
 if not path.exists(opt.checkpoint_dir) then lfs.mkdir(opt.checkpoint_dir) end
@@ -148,16 +163,23 @@ else
     print('creating an ' .. opt.model .. ' with ' .. opt.num_layers .. ' layers' .. ' rnn_size ' .. opt.rnn_size)
     protos = {}
     if opt.model == 'lstm' then
-        protos.rnn = LSTM.lstm(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout)
+        --protos.rnn = LSTM.lstm(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout)
     elseif opt.model == 'gru' then
-        protos.rnn_encoder = nn.MaskZero(GRU.gru(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout, 1), 1)
+		--[[
+        protos.rnn_encoder = nn.MaskZero(GRU.gru(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout, 1), 0)
 		protos.rnn_decoder = nn.MaskZero(GRU.gru(opt.rnn_size, opt.rnn_size, opt.num_layers, opt.dropout, 0), 1)
 		protos.rnn_projection = nn.MaskZero(LogSoftMaxProjection.log_softmax_projection(opt.rnn_size, vocab_size), 1)
 		protos.attention = nn.MaskZero(Attention.global_attention(opt.batch_size, opt.rnn_size), 1)
+		--]]
+        protos.rnn_encoder = GRU.gru(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout, 1)
+		protos.rnn_decoder = GRU.gru(opt.rnn_size, opt.rnn_size, opt.num_layers, opt.dropout, 0)
+		protos.rnn_projection = LogSoftMaxProjection.log_softmax_projection(opt.rnn_size, vocab_size)
+		protos.attention = Attention.global_attention(opt.batch_size, opt.rnn_size)
     elseif opt.model == 'rnn' then
-        protos.rnn = RNN.rnn(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout)
+        --protos.rnn = RNN.rnn(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout)
     end
-    protos.criterion = nn.MaskZeroCriterion(nn.ClassNLLCriterion(), 1)
+    --protos.criterion = nn.MaskZeroCriterion(nn.ClassNLLCriterion(), 1)
+    protos.criterion = nn.CrossEntropyCriterion()
 end
 
 -- the initial state of the cell/hidden states
@@ -209,8 +231,8 @@ for name,proto in pairs(protos) do
 end
 -- preprocessing helper function
 function prepro(x,y)
-    x = x:transpose(1,2):contiguous():resize(x:size(2), x:size(1), 1) -- swap the axes for faster indexing
-    y = y:transpose(1,2):contiguous():resize(y:size(2), y:size(1), 1)
+    x = x:transpose(1,2):contiguous():resize(x:size(2), x:size(1)) -- swap the axes for faster indexing
+    y = y:transpose(1,2):contiguous():resize(y:size(2), y:size(1))
     if opt.gpuid >= 0 and opt.opencl == 0 then -- ship the input arrays to GPU
         -- have to convert to float because integers can't be cuda()'d
         x = x:float():cuda()
@@ -226,22 +248,22 @@ end
 -- evaluate the loss over an entire split
 function eval_split(split_index, max_batches)
     print('evaluating loss over split index ' .. split_index)
-    local n = loader.split_sizes[split_index]
+    local n = loader.number_of_valid_batches
     if max_batches ~= nil then n = math.min(max_batches, n) end
 
-    loader:reset_batch_pointer(split_index) -- move batch iteration pointer for this split to front
+    loader:reset_valid_pointer(split_index) -- move batch iteration pointer for this split to front
     local loss = 0
     local encoder_rnn_state = {[0] = init_state}
-    local decoder_rnn_state = {[0] = init_state}
+	local total_recall = 0
     
     for i = 1,n do -- iterate over batches in the split
 		local attention_input = {}
 		local attention_output = {}
         -- fetch a batch
-        local x, y = loader:next_batch(split_index)
+        local x, y, seq_len, nnz = loader:next_valid_batch()
         x,y = prepro(x,y)
         -- forward pass
-        for t=1,opt.seq_length do
+        for t=1,seq_len do
             clones.rnn_encoder[t]:evaluate() -- for dropout proper functioning
             local encoder_lst = clones.rnn_encoder[t]:forward{x[t], unpack(encoder_rnn_state[t-1])}
 			if type(encoder_lst) ~= 'table' then 
@@ -252,11 +274,11 @@ function eval_split(split_index, max_batches)
 
 			table.insert(attention_input, encoder_lst[#encoder_lst])
 			clones.attention[t]:evaluate()
-			--print(attention_input)
 			local c = clones.attention[t]:forward({encoder_lst[#encoder_lst], attention_input})
 			table.insert(attention_output, c)
         end
-        for t=1,opt.seq_length do
+		local decoder_rnn_state = {[0] = encoder_rnn_state[seq_len]}
+        for t=1,seq_len do
 			clones.rnn_decoder[t]:evaluate()
 			--local decoder_lst = clones.rnn_decoder[t]:forward({encoder_rnn_state[t][#init_state], unpack(decoder_rnn_state[t-1])})
 			local decoder_lst = clones.rnn_decoder[t]:forward({attention_output[t], unpack(decoder_rnn_state[t-1])})
@@ -264,16 +286,26 @@ function eval_split(split_index, max_batches)
 			decoder_rnn_state[t] = {}
 			for i=1,#init_state do table.insert(decoder_rnn_state[t], decoder_lst[i]) end
 
-            prediction = clones.rnn_projection[t]:forward(decoder_lst[#init_state]) 
-            loss = loss + clones.criterion[t]:forward(prediction, y[t])
+            local prediction = clones.rnn_projection[t]:forward(decoder_lst[#init_state]) 
+			local scores, _ = prediction:topk(20, 2, true)
+			local threshold, _ = scores:min(2)
+			local target_scores = get_target_scores(prediction, y[t])
+			--print(threshold)
+			--print(target_scores)
+			
+			local recall = (target_scores - threshold):gt(0):sum() / opt.batch_size
+			total_recall = total_recall + recall / seq_len
+			
+            loss = loss + clones.criterion[t]:forward(prediction, y[t]) / seq_len
         end
         -- carry over lstm state
         --rnn_state[0] = rnn_state[#rnn_state]
-        print(i .. '/' .. n .. '...')
     end
 
-
-    loss = loss / opt.seq_length / n
+	loss = loss / n
+	total_recall = total_recall / n
+	print(loss)
+	print(total_recall)
     return loss
 end
 
@@ -287,16 +319,15 @@ function feval(x)
     grad_params:zero()
 
     ------------------ get minibatch -------------------
-    local x, y = loader:next_batch(1)
+    local x, y, seq_len, nnz = loader:next_train_batch()
     x,y = prepro(x,y)
     ------------------- forward pass -------------------
     local encoder_rnn_state = {[0] = encoder_init_state_global}
-	local decoder_rnn_state = {[0] = decoder_init_state_global}
 	local attention_input = {}
 	local attention_output = {}
 	local predictions = {}           -- softmax outputs
     local loss = 0
-    for t=1,opt.seq_length do
+    for t=1,seq_len do
 		-- foward encoder
         clones.rnn_encoder[t]:training() -- make sure we are in correct mode (this is cheap, sets flag)
         local encoder_lst = clones.rnn_encoder[t]:forward({x[t], unpack(encoder_rnn_state[t-1])})
@@ -306,11 +337,11 @@ function feval(x)
 
 		clones.attention[t]:training()
 		table.insert(attention_input, encoder_lst[#encoder_lst])
-		--print(attention_input)
 		local c = clones.attention[t]:forward({encoder_lst[#encoder_lst], attention_input})
 		table.insert(attention_output, c)
     end
-    for t=1,opt.seq_length do
+	local decoder_rnn_state = {[0] = encoder_rnn_state[seq_len]}
+    for t=1,seq_len do
 		-- foward decoder
 		clones.rnn_decoder[t]:training()
 		local decoder_lst = clones.rnn_decoder[t]:forward({attention_output[t], unpack(decoder_rnn_state[t-1])})
@@ -322,14 +353,14 @@ function feval(x)
         predictions[t] = clones.rnn_projection[t]:forward(decoder_lst[#init_state]) -- last element is the prediction
         loss = loss + clones.criterion[t]:forward(predictions[t], y[t])
     end
-    loss = loss / opt.seq_length
+    loss = loss / seq_len
     ------------------ backward pass -------------------
     -- initialize gradient at time t to be zeros (there's no influence from future)
-    local encoder_drnn_state = {[opt.seq_length] = clone_list(init_state, true)} -- true also zeros the clones
-	local decoder_drnn_state = {[opt.seq_length] = clone_list(init_state, true)}
+    local encoder_drnn_state = {[seq_len] = clone_list(init_state, true)} -- true also zeros the clones
+	local decoder_drnn_state = {[seq_len] = clone_list(init_state, true)}
 	local decoder_drnn_input = {}
 	local acc = {}
-    for t=opt.seq_length,1,-1 do
+    for t=seq_len,1,-1 do
         -- backprop decoder
         local doutput_t = clones.criterion[t]:backward(predictions[t], y[t])
 		local dprojection = clones.rnn_projection[t]:backward(decoder_rnn_state[t][#init_state], doutput_t)
@@ -356,7 +387,7 @@ function feval(x)
 		table.insert(acc, torch.zeros(opt.batch_size, opt.rnn_size))
 
     end
-    for t=opt.seq_length,1,-1 do
+    for t=seq_len,1,-1 do
 		-- backward attention
 
 		local dattention = clones.attention[t]:backward({encoder_rnn_state[t][#init_state], attention_input}, decoder_drnn_input[t])
@@ -399,14 +430,16 @@ end
 train_losses = {}
 val_losses = {}
 local optim_state = {learningRate = opt.learning_rate, alpha = opt.decay_rate}
-local iterations = opt.max_epochs * loader.ntrain
-local iterations_per_epoch = loader.ntrain
+local iterations = opt.max_epochs * loader.number_of_train_batches
+local iterations_per_epoch = loader.number_of_train_batches
 local loss0 = nil
+print("start training")
+local total_loss = 0
 for i = 1, iterations do
-    local epoch = i / loader.ntrain
+    local epoch = i / loader.number_of_train_batches
 
     local timer = torch.Timer()
-    local _, loss = optim.rmsprop(feval, params, optim_state)
+    local _, loss = optim.adam(feval, params, optim_state)
     if opt.accurate_gpu_timing == 1 and opt.gpuid >= 0 then
         --[[
         Note on timing: The reported time can be off because the GPU is invoked async. If one
@@ -418,10 +451,11 @@ for i = 1, iterations do
     local time = timer:time().real
     
     local train_loss = loss[1] -- the loss is inside a list, pop it
+	total_loss = total_loss + train_loss
     train_losses[i] = train_loss
 
     -- exponential learning rate decay
-    if i % loader.ntrain == 0 and opt.learning_rate_decay < 1 then
+    if i % loader.number_of_train_batches == 0 and opt.learning_rate_decay < 1 then
         if epoch >= opt.learning_rate_decay_after then
             local decay_factor = opt.learning_rate_decay
             optim_state.learningRate = optim_state.learningRate * decay_factor -- decay it
@@ -450,7 +484,8 @@ for i = 1, iterations do
     end
 
     if i % opt.print_every == 0 then
-        print(string.format("%d/%d (epoch %.3f), train_loss = %6.8f, grad/param norm = %6.4e, time/batch = %.4fs", i, iterations, epoch, train_loss, grad_params:norm() / params:norm(), time))
+        print(string.format("%d/%d (epoch %.3f), train_loss = %6.8f, grad/param norm = %6.4e, time/batch = %.4fs", i, iterations, epoch, total_loss / opt.print_every, grad_params:norm() / params:norm(), time))
+		total_loss = 0
     end
    
     if i % 10 == 0 then collectgarbage() end
@@ -461,10 +496,15 @@ for i = 1, iterations do
         break -- halt
     end
     if loss0 == nil then loss0 = loss[1] end
-    if loss[1] > loss0 * 3 then
+    if loss[1] > loss0 * 30 then
         print('loss is exploding, aborting.')
         break -- halt
     end
 end
 
+function range(stop)
+	idx = {}
+	for i = 1, stop do table.insert(idx, i) end
+	return idx
+end
 

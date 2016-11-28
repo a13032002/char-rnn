@@ -260,7 +260,8 @@ function eval_split(split_index, max_batches)
 		local attention_input = {}
 		local attention_output = {}
         -- fetch a batch
-        local x, y, seq_len, nnz = loader:next_valid_batch()
+        local x, y = loader:next_valid_batch()
+        seq_len = y:size()[2]
         x,y = prepro(x,y)
         -- forward pass
         for t=1,seq_len do
@@ -289,9 +290,7 @@ function eval_split(split_index, max_batches)
             local prediction = clones.rnn_projection[t]:forward(decoder_lst[#init_state]) 
 			local scores, _ = prediction:topk(20, 2, true)
 			local threshold, _ = scores:min(2)
-			local target_scores = get_target_scores(prediction, y[t])
-			--print(threshold)
-			--print(target_scores)
+			local target_scores = get_target_scores(prediction, y[t]):cuda()
 			
 			local recall = (target_scores - threshold):gt(0):sum() / opt.batch_size
 			total_recall = total_recall + recall / seq_len
@@ -319,7 +318,8 @@ function feval(x)
     grad_params:zero()
 
     ------------------ get minibatch -------------------
-    local x, y, seq_len, nnz = loader:next_train_batch()
+    local x, y = loader:next_train_batch()
+    seq_len = y:size()[2]
     x,y = prepro(x,y)
     ------------------- forward pass -------------------
     local encoder_rnn_state = {[0] = encoder_init_state_global}
@@ -384,7 +384,7 @@ function feval(x)
             end
         end
 
-		table.insert(acc, torch.zeros(opt.batch_size, opt.rnn_size))
+		table.insert(acc, torch.zeros(opt.batch_size, opt.rnn_size):cuda())
 
     end
     for t=seq_len,1,-1 do
@@ -466,7 +466,7 @@ for i = 1, iterations do
     -- every now and then or on last iteration
     if i % opt.eval_val_every == 0 or i == iterations then
         -- evaluate loss on validation data
-        local val_loss = eval_split(2) -- 2 = validation
+        local val_loss = eval_split(2, 300) -- 2 = validation
         val_losses[i] = val_loss
 
         local savefile = string.format('%s/lm_%s_epoch%.2f_%.4f.t7', opt.checkpoint_dir, opt.savefile, epoch, val_loss)

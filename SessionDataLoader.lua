@@ -25,6 +25,7 @@ function SessionDataLoader.create(session_file, batch_size, train_fraction)
   local perm_index = {}
   setmetatable(self, SessionDataLoader)
 
+  math.randomseed(10807)
   local sessions = {}
   for line in io.lines(session_file) do
     --if #x_batches == 105 then break end

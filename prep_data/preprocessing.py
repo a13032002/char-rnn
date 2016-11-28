@@ -7,10 +7,10 @@ random.seed(0)
 def output_sessions(sessions, f):
     random.shuffle(sessions)
     for session in sessions:
-        print >> f, ' '.join(session)
+        print >> f, ' '.join(session[:50])
 
 def process(input_file='../data/yoochoose/yoochoose-clicks.dat', output_file='../data/yoochoose/yoochoose-sessions.dat', 
-            dict_file='../data/yoochoose/item_dict.pkl', start_time=20140101000000000L, end_time=20140801000000000L, min_freq=2):
+            dict_file='../data/yoochoose/item_dict.pkl', start_time=20140101000000000L, end_time=20141001000000000L, min_freq=2):
     '''
     Process the input data line by line, group data by session number (first attr), and filter by specified
     time stamp & minimum frequency.
@@ -28,8 +28,8 @@ def process(input_file='../data/yoochoose/yoochoose-clicks.dat', output_file='..
         for line in f_in:
             session, time, item = line.split(',')[:3]
             time_n = parse_time(time[:-1])
-            if time_n < start_time or time_n > end_time:
-                continue
+            #if time_n < start_time or time_n > end_time:
+            #    continue
             if item not in item_dict:
                 num_items += 1
                 item_dict[item] = str(num_items)
@@ -49,14 +49,18 @@ def process(input_file='../data/yoochoose/yoochoose-clicks.dat', output_file='..
                 cur_session_items = [item]
                 cur_session_len = 1
 
-    print len(item_dict), max_session_len
+        for k in sessions:
+            if len(sessions[k]) == 0: continue
+            output_sessions(sessions[k], f_out)
+            for i in xrange(batch_size - len(sessions[k])):
+                output_sessions([sessions[k][0]], f_out)
+
+
+
+    print len(item_dict), max_session_len, num_items
     with open(dict_file, 'wb') as dict_out:
         pickle.dump(item_dict, dict_out)
 
-    lost = 0
-    for k in sessions:
-        lost += len(sessions[k])
-    print lost
 def parse_time(time_string):
     date, time = time_string.split('T')
     year, month, day = date.split('-')

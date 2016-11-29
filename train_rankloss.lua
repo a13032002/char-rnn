@@ -257,13 +257,14 @@ function eval_split(split_index, max_batches)
   local loss = 0
   local encoder_rnn_state = {[0] = init_state}
   local total_recall = 0
-  local ones = torch.ones(opt.batch_size, vocab_size)
+  local ones = torch.ones(opt.batch_size, vocab_size):cuda()
 
   for i = 1,n do -- iterate over batches in the split
     local attention_input = {}
     local attention_output = {}
     -- fetch a batch
-    local x, y, seq_len, nnz = loader:next_valid_batch()
+    local x, y = loader:next_valid_batch()
+    seq_len = x:size()[2]
     x,y = prepro(x,y)
     -- forward pass
     for t=1,seq_len do
@@ -292,7 +293,7 @@ function eval_split(split_index, max_batches)
       local prediction = clones.rnn_projection[t]:forward(decoder_lst[#init_state]) 
       local scores, _ = prediction:topk(20, 2, true)
       local threshold, _ = scores:min(2)
-      local target_scores = get_target_scores(prediction, y[t])
+      local target_scores = get_target_scores(prediction, y[t]):cuda()
       --print(threshold)
       --print(target_scores)
 
@@ -324,7 +325,8 @@ function feval(x)
   grad_params:zero()
 
   ------------------ get minibatch -------------------
-  local x, y, seq_len, nnz = loader:next_train_batch()
+  local x, y = loader:next_train_batch()
+  seq_len = x:size()[2]
   x,y = prepro(x,y)
   ------------------- forward pass -------------------
   local encoder_rnn_state = {[0] = encoder_init_state_global}
@@ -333,7 +335,7 @@ function feval(x)
   local predictions = {}           -- softmax outputs
   local differences = {}
   local loss = 0
-  local ones = torch.ones(opt.batch_size, vocab_size)
+  local ones = torch.ones(opt.batch_size, vocab_size):cuda()
   for t=1,seq_len do
     -- foward encoder
     clones.rnn_encoder[t]:training() -- make sure we are in correct mode (this is cheap, sets flag)
@@ -393,7 +395,7 @@ function feval(x)
       end
     end
 
-    table.insert(acc, torch.zeros(opt.batch_size, opt.rnn_size))
+    table.insert(acc, torch.zeros(opt.batch_size, opt.rnn_size):cuda())
 
   end
   for t=seq_len,1,-1 do

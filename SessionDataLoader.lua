@@ -12,7 +12,7 @@ local function shuffleTable(a, b)
     b[i], b[j] = b[j], b[i]
   end
 end
-function SessionDataLoader.create(session_file, batch_size, train_fraction)
+function SessionDataLoader.create(session_file, batch_size, valid_batches)
 
   local self = {}
   local x_batches = {}
@@ -62,7 +62,7 @@ function SessionDataLoader.create(session_file, batch_size, train_fraction)
 
   shuffleTable(x_batches, y_batches)
   number_of_batches = #x_batches
-  self.number_of_valid_batches = 300
+  self.number_of_valid_batches = valid_batches
   self.number_of_train_batches = number_of_batches - self.number_of_valid_batches
   self.x_batches = x_batches
   self.y_batches = y_batches

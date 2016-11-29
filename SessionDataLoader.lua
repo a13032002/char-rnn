@@ -94,7 +94,7 @@ function SessionDataLoader:next_valid_batch()
   self.valid_index = self.valid_index + 1
   if self.valid_index > self.number_of_valid_batches then self.valid_index = 1 end
 
-  return self.x_batches[self.valid_index], self.y_batches[self.valid_index]
+  return self.x_batches[self.number_of_train_batches + self.valid_index], self.y_batches[self.number_of_train_batches + self.valid_index]
 end
 
 function SessionDataLoader:reset_valid_pointer()

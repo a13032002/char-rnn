@@ -290,7 +290,11 @@ function eval_split(split_index, max_batches)
             local prediction = clones.rnn_projection[t]:forward(decoder_lst[#init_state]) 
 			local scores, _ = prediction:topk(20, 2, true)
 			local threshold, _ = scores:min(2)
-			local target_scores = get_target_scores(prediction, y[t]):cuda()
+			local target_scores = get_target_scores(prediction, y[t])
+			if opt.gpuid ~= -1 then
+				target_scores = target_scores:cuda()
+			end
+				
 			
 			local recall = (target_scores - threshold):gt(0):sum() / opt.batch_size
 			total_recall = total_recall + recall / seq_len
@@ -384,7 +388,11 @@ function feval(x)
             end
         end
 
-		table.insert(acc, torch.zeros(opt.batch_size, opt.rnn_size):cuda())
+		if opt.gpuid ~= -1 then
+			table.insert(acc, torch.zeros(opt.batch_size, opt.rnn_size):cuda())
+		else
+			table.insert(acc, torch.zeros(opt.batch_size, opt.rnn_size))
+		end
 
     end
     for t=seq_len,1,-1 do

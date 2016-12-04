@@ -1,12 +1,12 @@
 local SessionDataLoader = {}
 SessionDataLoader.__index = SessionDataLoader
-local function shuffleTable(a, b)
-  assert(#a == #b)
+local function shuffleTable(a, b, n)
+  assert(#a == #b and #a >= n)
   local rand = math.random 
   local iterations = #a
   local j
 
-  for i = iterations, 2, -1 do
+  for i = n, 2, -1 do
     j = rand(i)
     a[i], a[j] = a[j], a[i]
     b[i], b[j] = b[j], b[i]
@@ -60,10 +60,10 @@ function SessionDataLoader.create(session_file, batch_size, valid_batches)
     end
   end
 
-  shuffleTable(x_batches, y_batches)
   number_of_batches = #x_batches
   self.number_of_valid_batches = valid_batches
   self.number_of_train_batches = number_of_batches - self.number_of_valid_batches
+  shuffleTable(x_batches, y_batches, self.number_of_train_batches)
   self.x_batches = x_batches
   self.y_batches = y_batches
   self.number_of_nonzeros = number_of_nonzeros

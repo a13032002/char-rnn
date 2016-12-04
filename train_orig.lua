@@ -126,7 +126,7 @@ end
 
 -- create the data loader class
 --local loader = CharSplitLMMinibatchLoader.create(opt.data_dir, opt.batch_size, opt.seq_length, split_sizes)
-local loader = SessionDataLoader.create('./data/yoochoose/yoochoose-sessions.dat', opt.batch_size, 300)
+local loader = SessionDataLoader.create('./data/yoochoose/yoochoose-sessions.dat', opt.batch_size, 5000)
 opt.seq_length = loader.global_max_session_length
 local vocab_size = loader.max_index  -- the number of distinct characters
 print('vocab size: ' .. vocab_size)
@@ -392,7 +392,7 @@ for i = 1, iterations do
   -- every now and then or on last iteration
   if i % opt.eval_val_every == 0 or i == iterations then
     -- evaluate loss on validation data
-    local val_loss = eval_split(2, 100) -- 2 = validation
+    local val_loss = eval_split(2, 1000) -- 2 = validation
     val_losses[i] = val_loss
 
     local savefile = string.format('%s/lm_%s_epoch%.2f_%.4f.t7', opt.checkpoint_dir, opt.savefile, epoch, val_loss)

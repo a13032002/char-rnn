@@ -18,7 +18,7 @@ require 'util.OneHot'
 require 'util.misc'
 local model_utils = require 'util.model_utils'
 
-local SessionDataLoader = require 'SessionDataLoader'
+local SessionDataLoaderTest = require 'SessionDataLoaderTest'
 cmd = torch.CmdLine()
 cmd:text()
 cmd:text('Sample from a character-level language model')
@@ -100,8 +100,6 @@ protos = checkpoint.protos
 protos.rnn_encoder:evaluate() -- put in eval mode so that dropout works properly
 protos.rnn_projection:evaluate() -- put in eval mode so that dropout works properly
 
-local attentions = model_utils.clone_many_times(protos.attention, 300, not protos.attention.parameters)
-
 -- initialize the rnn state to all zeros
 gprint('creating an ' .. checkpoint.opt.model .. '...')
 local encoder_init_state
@@ -132,21 +130,30 @@ function prepro(x,y)
   return x:float(),y
 end
 
-local loader = SessionDataLoader.create(opt.test_file_path, 1, 0)
+local loader = SessionDataLoaderTest.create(opt.test_file_path, checkpoint.opt.batch_size)
 -- start sampling/argmaxing
 
 local total_recall = 0
-for i=1, loader.number_of_train_batches do
+local total_nnz = 0
+local total_mrr = 0
+for i=1, loader.number_of_batches do
 
   local encoder_rnn_state = {[0] = encoder_init_state}
   local attention_input = {}
   local attention_output = {}
   -- fetch a batch
-  local x, y = loader:next_train_batch()
+  local x, y, lengths = loader:next_batch()
   seq_len = y:size()[2]
-  x = x:repeatTensor(checkpoint.opt.batch_size, 1)
-  y = y:repeatTensor(checkpoint.opt.batch_size, 1)
   x,y = prepro(x,y)
+
+  local local_nnzs = {}
+  local local_recalls = {}
+  local local_mrrs = {}
+  for j= 1,checkpoint.opt.batch_size do
+	  local_nnzs[j] = 0
+	  local_recalls[j] = 0
+	  local_mrrs[j] = 0
+  end
 
   -- forward pass
   for t=1,seq_len do
@@ -157,21 +164,37 @@ for i=1, loader.number_of_train_batches do
     encoder_rnn_state[t] = {}
     for i=1,#encoder_init_state do table.insert(encoder_rnn_state[t], encoder_lst[i]) end
     local prediction = protos.rnn_projection:forward(encoder_lst[#encoder_lst]) 
-    local scores, _ = prediction:topk(20, 2, true)
+    local scores, _ = prediction:topk(20, 2, true):double()
     local threshold, _ = scores:min(2)
     local target_scores = get_target_scores(prediction, y[t])
-    if opt.gpuid ~= -1 then
-      target_scores = target_scores:cuda()
-    end
 
+	  for j=1, checkpoint.opt.batch_size do
+		  if lengths[j] >= t then
+			  total_nnz = total_nnz + 1
+			  local_nnzs[j] = local_nnzs[j] + 1
+			  if target_scores[j]:ge(threshold[j]):sum() == 1 then 
+				  total_recall = total_recall + 1
+				  local_recalls[j] = local_recalls[j] + 1
+			  end
 
-    local recall = (target_scores - threshold):gt(0):sum() / checkpoint.opt.batch_size
-    total_recall = total_recall + recall / seq_len
-
-    print(i)
+			  local rank = 1
+			  for l = 1, 20 do 
+				 if scores[j][l] > target_scores[j][1] then rank = rank + 1 end
+			  end
+			  if rank <= 20 then 
+				  local_mrrs[j] = local_mrrs[j] + 1.0 / rank 
+				  total_mrr = total_mrr + 1.0 / rank
+			  end
+		  end
+	  end
+  end
+  for j = 1, checkpoint.opt.batch_size do
+	  if local_nnzs[j] ~= 0 then 
+		  print(local_nnzs[j] + 1, local_recalls[j] / local_nnzs[j], local_mrrs[j] / local_nnzs[j])
+	  end
   end
 end
-print(total_recall / loader.number_of_train_batches)
+--print(total_recall / total_nnz, total_mrr / total_nnz)
 
 io.write('\n') io.flush()
 

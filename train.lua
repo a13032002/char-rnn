@@ -126,7 +126,7 @@ end
 
 -- create the data loader class
 --local loader = CharSplitLMMinibatchLoader.create(opt.data_dir, opt.batch_size, opt.seq_length, split_sizes)
-local loader = SessionDataLoader.create('./data/yoochoose/yoochoose-sessions.dat', opt.batch_size, 300)
+local loader = SessionDataLoader.create('./data/yoochoose/yoochoose-sessions.dat', opt.batch_size, 1000)
 opt.seq_length = loader.global_max_session_length
 local vocab_size = loader.max_index  -- the number of distinct characters
 print('vocab size: ' .. vocab_size)
@@ -254,6 +254,7 @@ function eval_split(split_index, max_batches)
     loader:reset_valid_pointer(split_index) -- move batch iteration pointer for this split to front
     local loss = 0
     local encoder_rnn_state = {[0] = init_state}
+    local decoder_rnn_state = {[0] = init_state}
 	local total_recall = 0
     
     for i = 1,n do -- iterate over batches in the split
@@ -278,7 +279,6 @@ function eval_split(split_index, max_batches)
 			local c = clones.attention[t]:forward({encoder_lst[#encoder_lst], attention_input})
 			table.insert(attention_output, c)
         end
-		local decoder_rnn_state = {[0] = encoder_rnn_state[seq_len]}
         for t=1,seq_len do
 			clones.rnn_decoder[t]:evaluate()
 			--local decoder_lst = clones.rnn_decoder[t]:forward({encoder_rnn_state[t][#init_state], unpack(decoder_rnn_state[t-1])})
@@ -327,6 +327,7 @@ function feval(x)
     x,y = prepro(x,y)
     ------------------- forward pass -------------------
     local encoder_rnn_state = {[0] = encoder_init_state_global}
+    local decoder_rnn_state = {[0] = encoder_init_state_global}
 	local attention_input = {}
 	local attention_output = {}
 	local predictions = {}           -- softmax outputs
@@ -344,7 +345,6 @@ function feval(x)
 		local c = clones.attention[t]:forward({encoder_lst[#encoder_lst], attention_input})
 		table.insert(attention_output, c)
     end
-	local decoder_rnn_state = {[0] = encoder_rnn_state[seq_len]}
     for t=1,seq_len do
 		-- foward decoder
 		clones.rnn_decoder[t]:training()
@@ -474,7 +474,7 @@ for i = 1, iterations do
     -- every now and then or on last iteration
     if i % opt.eval_val_every == 0 or i == iterations then
         -- evaluate loss on validation data
-        local val_loss = eval_split(2, 300) -- 2 = validation
+        local val_loss = eval_split(2, 5000) -- 2 = validation
         val_losses[i] = val_loss
 
         local savefile = string.format('%s/lm_%s_epoch%.2f_%.4f.t7', opt.checkpoint_dir, opt.savefile, epoch, val_loss)

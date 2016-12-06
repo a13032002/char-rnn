@@ -216,7 +216,7 @@ for i=1, loader.number_of_batches do
 	  end
   end
 end
---print(total_recall / total_nnz, total_mrr / total_nnz)
+print(total_recall / total_nnz, total_mrr / total_nnz)
 
 io.write('\n') io.flush()
 

@@ -16,6 +16,7 @@ require 'lfs'
 
 require 'util.OneHot'
 require 'util.misc'
+require 'PositiveNegativeDifference'
 local model_utils = require 'util.model_utils'
 
 local SessionDataLoaderTest = require 'SessionDataLoaderTest'
@@ -194,7 +195,7 @@ for i=1, loader.number_of_batches do
 	  end
   end
 end
---print(total_recall / total_nnz, total_mrr / total_nnz)
+print(total_recall / total_nnz, total_mrr / total_nnz)
 
 io.write('\n') io.flush()
 

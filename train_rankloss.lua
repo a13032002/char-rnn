@@ -127,7 +127,7 @@ end
 
 -- create the data loader class
 --local loader = CharSplitLMMinibatchLoader.create(opt.data_dir, opt.batch_size, opt.seq_length, split_sizes)
-local loader = SessionDataLoader.create('./data/yoochoose/yoochoose-sessions.dat', opt.batch_size, 5000)
+local loader = SessionDataLoader.create('./data/yoochoose/yoochoose-sessions.dat', opt.batch_size, 1000)
 opt.seq_length = loader.global_max_session_length
 local vocab_size = loader.max_index  -- the number of distinct characters
 print('vocab size: ' .. vocab_size)
